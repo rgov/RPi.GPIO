@@ -1,3 +1,10 @@
+!! This is not the official repository for RPi.GPIO. Please find it at:
+
+https://pypi.org/project/RPi.GPIO/
+https://sourceforge.net/projects/raspberry-gpio-python/
+
+--
+
 This package provides a class to control the GPIO on a Raspberry Pi.
 
 Note that this module is unsuitable for real-time or timing critical applications.  This is because you
