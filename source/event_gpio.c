@@ -52,7 +52,7 @@ struct gpios *gpio_list = NULL;
 struct callback
 {
     unsigned int gpio;
-    void (*func)(unsigned int gpio);
+    event_callback func;
     struct callback *next;
 };
 struct callback *callbacks = NULL;
@@ -203,7 +203,7 @@ struct gpios *new_gpio(unsigned int gpio)
     new_gpio->initial_thread = 1;
     new_gpio->initial_wait = 1;
     new_gpio->bouncetime = -666;
-    new_gpio->lastcall = {0};
+    bzero(&new_gpio->lastcall, sizeof(new_gpio->lastcall));
     new_gpio->thread_added = 0;
 
     if (gpio_list == NULL) {
@@ -283,12 +283,12 @@ int callback_exists(unsigned int gpio)
     return 0;
 }
 
-void run_callbacks(struct edge_event *event)
+void run_callbacks(struct edge_event event)
 {
     struct callback *cb = callbacks;
     while (cb != NULL)
     {
-        if (cb->gpio == event->gpio)
+        if (cb->gpio == event.gpio)
             cb->func(event);
         cb = cb->next;
     }
@@ -324,12 +324,12 @@ static int
 timespec_subtract(struct timespec *result, struct timespec x, struct timespec y)
 {
     /* Perform the carry for the later subtraction by updating y. */
-    if (x.tv_usec < y.tv_usec) {
+    if (x.tv_nsec < y.tv_nsec) {
         int d = (y.tv_nsec - x.tv_nsec) / 1e9 + 1;
         y.tv_nsec -= 1e9 * d;
         y.tv_sec += d;
     }
-    if (x.tv_usec - y.tv_nsec > 1e9) {
+    if (x.tv_nsec - y.tv_nsec > 1e9) {
         int d = (x.tv_nsec - y.tv_nsec) / 1e9;
         y.tv_nsec += 1e9 * d;
         y.tv_sec -= d;
@@ -372,7 +372,7 @@ void *poll_thread(void *threadarg)
                 timespec_subtract(&timedelta, event.time, g->lastcall);
                 if (g->bouncetime == -666 ||
                     (timedelta.tv_sec > (g->bouncetime / 1000)) ||
-                    (timedelta.tv_sec == (g->bouncetime / 1000) && timedelta.tv_nsec >= (g->bouncetime % 1000) * 1E3))
+                    (timedelta.tv_sec == (g->bouncetime / 1000) && timedelta.tv_nsec >= (g->bouncetime % 1000) * 1E3)
                    ) {
                     g->lastcall = event.time;
                     event_occurred[g->gpio] = 1;
@@ -528,8 +528,8 @@ int blocking_wait_for_edge(unsigned int gpio, unsigned int edge, int bouncetime,
     struct epoll_event events, ev;
     char buf;
     struct gpios *g = NULL;
-    struct timeval tv_timenow;
-    unsigned long long timenow;
+    struct timespec timenow;
+    struct timespec timedelta;
     int finished = 0;
     int initial_edge = 1;
 
@@ -586,9 +586,12 @@ int blocking_wait_for_edge(unsigned int gpio, unsigned int edge, int bouncetime,
         if (initial_edge) {    // first time triggers with current state, so ignore
             initial_edge = 0;
         } else {
-            gettimeofday(&tv_timenow, NULL);
-            timenow = tv_timenow.tv_sec*1E6 + tv_timenow.tv_usec;
-            if (g->bouncetime == -666 || timenow - g->lastcall > g->bouncetime*1000 || g->lastcall == 0 || g->lastcall > timenow) {
+            clock_gettime(CLOCK_MONOTONIC, &timenow);
+            timespec_subtract(&timedelta, timenow, g->lastcall);
+            if (g->bouncetime == -666 ||
+                (timedelta.tv_sec > (g->bouncetime / 1000)) ||
+                (timedelta.tv_sec == (g->bouncetime / 1000) && timedelta.tv_nsec >= (g->bouncetime % 1000) * 1E3)
+               ) {
                 g->lastcall = timenow;
                 finished = 1;
             }

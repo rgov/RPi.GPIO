@@ -596,12 +596,21 @@ static void run_py_callbacks(struct edge_event event)
    PyGILState_STATE gstate;
    struct py_callback *cb = py_callbacks;
 
+   PyObject *time_sec = PyLong_FromLong(event.time.tv_sec);
+   PyObject *time_nsec = PyLong_FromLong(event.time.tv_nsec);
+   PyObject *time;
+   PyObject *nsecPerSecond = PyLong_FromLong(1E9);
+   time = PyNumber_Multiply(time_sec, nsecPerSecond);
+   Py_XDECREF(time_sec);
+   Py_XDECREF(time_nsec);
+   Py_XDECREF(nsecPerSecond);
+
    while (cb != NULL)
    {
       if (cb->gpio == event.gpio) {
          // run callback
          gstate = PyGILState_Ensure();
-         result = PyObject_CallFunction(cb->py_cb, "i", chan_from_gpio(event.gpio));
+         result = PyObject_CallFunction(cb->py_cb, "iO", chan_from_gpio(event.gpio), time);
          if (result == NULL && PyErr_Occurred()){
             PyErr_Print();
             PyErr_Clear();
@@ -611,6 +620,7 @@ static void run_py_callbacks(struct edge_event event)
       }
       cb = cb->next;
    }
+   Py_XDECREF(time);
 }
 
 static int add_py_callback(unsigned int gpio, PyObject *cb_func)
