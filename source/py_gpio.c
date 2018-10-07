@@ -583,7 +583,7 @@ static unsigned int chan_from_gpio(unsigned int gpio)
    return -1;
 }
 
-static void run_py_callbacks(unsigned int gpio)
+static void run_py_callbacks(struct edge_event event)
 {
    PyObject *result;
    PyGILState_STATE gstate;
@@ -591,10 +591,10 @@ static void run_py_callbacks(unsigned int gpio)
 
    while (cb != NULL)
    {
-      if (cb->gpio == gpio) {
+      if (cb->gpio == event.gpio) {
          // run callback
          gstate = PyGILState_Ensure();
-         result = PyObject_CallFunction(cb->py_cb, "i", chan_from_gpio(gpio));
+         result = PyObject_CallFunction(cb->py_cb, "i", chan_from_gpio(event.gpio));
          if (result == NULL && PyErr_Occurred()){
             PyErr_Print();
             PyErr_Clear();

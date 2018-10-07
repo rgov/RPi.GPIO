@@ -20,14 +20,27 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+#include <time.h>
+
+
 #define NO_EDGE      0
 #define RISING_EDGE  1
 #define FALLING_EDGE 2
 #define BOTH_EDGE    3
 
+
+struct edge_event {
+   unsigned int gpio;
+   unsigned int edge;
+   struct timespec time;
+};
+
+typedef void (*event_callback)(struct edge_event event);
+
+
 int add_edge_detect(unsigned int gpio, unsigned int edge, int bouncetime);
 void remove_edge_detect(unsigned int gpio);
-int add_edge_callback(unsigned int gpio, void (*func)(unsigned int gpio));
+int add_edge_callback(unsigned int gpio, event_callback func);
 int event_detected(unsigned int gpio);
 int gpio_event_added(unsigned int gpio);
 int event_initialise(void);

@@ -28,7 +28,7 @@ SOFTWARE.
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
-#include <sys/time.h>
+#include <time.h>
 #include "event_gpio.h"
 
 const char *stredge[4] = {"none", "rising", "falling", "both"};
@@ -43,7 +43,7 @@ struct gpios
     int initial_wait;
     int thread_added;
     int bouncetime;
-    unsigned long long lastcall;
+    struct timespec lastcall;
     struct gpios *next;
 };
 struct gpios *gpio_list = NULL;
@@ -203,7 +203,7 @@ struct gpios *new_gpio(unsigned int gpio)
     new_gpio->initial_thread = 1;
     new_gpio->initial_wait = 1;
     new_gpio->bouncetime = -666;
-    new_gpio->lastcall = 0;
+    new_gpio->lastcall = {0};
     new_gpio->thread_added = 0;
 
     if (gpio_list == NULL) {
@@ -247,7 +247,7 @@ int gpio_event_added(unsigned int gpio)
 }
 
 /******* callback list functions ********/
-int add_edge_callback(unsigned int gpio, void (*func)(unsigned int gpio))
+int add_edge_callback(unsigned int gpio, event_callback func)
 {
     struct callback *cb = callbacks;
     struct callback *new_cb;
@@ -283,13 +283,13 @@ int callback_exists(unsigned int gpio)
     return 0;
 }
 
-void run_callbacks(unsigned int gpio)
+void run_callbacks(struct edge_event *event)
 {
     struct callback *cb = callbacks;
     while (cb != NULL)
     {
-        if (cb->gpio == gpio)
-            cb->func(cb->gpio);
+        if (cb->gpio == event->gpio)
+            cb->func(event);
         cb = cb->next;
     }
 }
@@ -318,14 +318,40 @@ void remove_callbacks(unsigned int gpio)
     }
 }
 
+// Adapted from 
+// https://www.gnu.org/software/libc/manual/html_node/Elapsed-Time.html
+static int
+timespec_subtract(struct timespec *result, struct timespec x, struct timespec y)
+{
+    /* Perform the carry for the later subtraction by updating y. */
+    if (x.tv_usec < y.tv_usec) {
+        int d = (y.tv_nsec - x.tv_nsec) / 1e9 + 1;
+        y.tv_nsec -= 1e9 * d;
+        y.tv_sec += d;
+    }
+    if (x.tv_usec - y.tv_nsec > 1e9) {
+        int d = (x.tv_nsec - y.tv_nsec) / 1e9;
+        y.tv_nsec += 1e9 * d;
+        y.tv_sec -= d;
+    }
+    
+    /* Compute the time remaining to wait. tv_usec is certainly positive. */
+    result->tv_sec = x.tv_sec - y.tv_sec;
+    result->tv_nsec = x.tv_nsec - y.tv_nsec;
+    
+    /* Return 1 if result is negative. */
+    return x.tv_sec < y.tv_sec;
+}
+
 void *poll_thread(void *threadarg)
 {
     struct epoll_event events;
     char buf;
-    struct timeval tv_timenow;
-    unsigned long long timenow;
     struct gpios *g;
+    struct timespec timedelta;
     int n;
+
+    struct edge_event event;
 
     thread_running = 1;
     while (thread_running) {
@@ -340,12 +366,17 @@ void *poll_thread(void *threadarg)
             if (g->initial_thread) {     // ignore first epoll trigger
                 g->initial_thread = 0;
             } else {
-                gettimeofday(&tv_timenow, NULL);
-                timenow = tv_timenow.tv_sec*1E6 + tv_timenow.tv_usec;
-                if (g->bouncetime == -666 || timenow - g->lastcall > g->bouncetime*1000 || g->lastcall == 0 || g->lastcall > timenow) {
-                    g->lastcall = timenow;
+                event.gpio = g->gpio;
+                // TODO: Fill out the edge as well
+                clock_gettime(CLOCK_MONOTONIC, &event.time);
+                timespec_subtract(&timedelta, event.time, g->lastcall);
+                if (g->bouncetime == -666 ||
+                    (timedelta.tv_sec > (g->bouncetime / 1000)) ||
+                    (timedelta.tv_sec == (g->bouncetime / 1000) && timedelta.tv_nsec >= (g->bouncetime % 1000) * 1E3))
+                   ) {
+                    g->lastcall = event.time;
                     event_occurred[g->gpio] = 1;
-                    run_callbacks(g->gpio);
+                    run_callbacks(event);
                 }
             }
         } else if (n == -1) {
