@@ -70,6 +70,21 @@ static int mmap_gpio_mem(void)
    }
 }
 
+// helper function for py_cleanup
+static int cleanup_one(unsigned int gpio)
+{
+   // clean up any /sys/class exports
+   event_cleanup(gpio);
+
+   // set everything back to input
+   if (gpio_direction[gpio] != -1) {
+      setup_gpio(gpio, INPUT, PUD_OFF);
+      gpio_direction[gpio] = -1;
+      return 1;
+   }
+   return 0;
+}
+
 // python function cleanup(channel=None)
 static PyObject *py_cleanup(PyObject *self, PyObject *args, PyObject *kwargs)
 {
@@ -82,19 +97,6 @@ static PyObject *py_cleanup(PyObject *self, PyObject *args, PyObject *kwargs)
    PyObject *chantuple = NULL;
    PyObject *tempobj;
    static char *kwlist[] = {"channel", NULL};
-
-   void cleanup_one(void)
-   {
-      // clean up any /sys/class exports
-      event_cleanup(gpio);
-
-      // set everything back to input
-      if (gpio_direction[gpio] != -1) {
-         setup_gpio(gpio, INPUT, PUD_OFF);
-         gpio_direction[gpio] = -1;
-         found = 1;
-      }
-   }
 
    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|O", kwlist, &chanlist))
       return NULL;
@@ -140,7 +142,8 @@ static PyObject *py_cleanup(PyObject *self, PyObject *args, PyObject *kwargs)
       } else if (channel != -666) {    // channel was an int indicating single channel
          if (get_gpio_number(channel, &gpio))
             return NULL;
-         cleanup_one();
+         if (cleanup_one(gpio))
+            found = 1;
       } else {  // channel was a list/tuple
          for (i=0; i<chancount; i++) {
             if (chanlist) {
@@ -169,7 +172,8 @@ static PyObject *py_cleanup(PyObject *self, PyObject *args, PyObject *kwargs)
 
             if (get_gpio_number(channel, &gpio))
                return NULL;
-            cleanup_one();
+            if (cleanup_one(gpio))
+               found = 1;
          }
       }
    }
@@ -182,10 +186,43 @@ static PyObject *py_cleanup(PyObject *self, PyObject *args, PyObject *kwargs)
    Py_RETURN_NONE;
 }
 
+// helper function for setup()
+static int setup_one(int channel, int pud, int direction, int initial) {
+   unsigned int gpio;
+   int func;
+   
+   if (get_gpio_number(channel, &gpio))
+      return 0;
+
+   func = gpio_function(gpio);
+   if (gpio_warnings &&                             // warnings enabled and
+       ((func != 0 && func != 1) ||                 // (already one of the alt functions or
+       (gpio_direction[gpio] == -1 && func == 1)))  // already an output not set from this program)
+   {
+      PyErr_WarnEx(NULL, "This channel is already in use, continuing anyway.  Use GPIO.setwarnings(False) to disable warnings.", 1);
+   }
+
+   // warn about pull/up down on i2c channels
+   if (gpio_warnings) {
+      if (rpiinfo.p1_revision == 0) { // compute module - do nothing
+      } else if ((rpiinfo.p1_revision == 1 && (gpio == 0 || gpio == 1)) ||
+                 (gpio == 2 || gpio == 3)) {
+         if (pud == PUD_UP || pud == PUD_DOWN)
+            PyErr_WarnEx(NULL, "A physical pull up resistor is fitted on this channel!", 1);
+      }
+   }
+
+   if (direction == OUTPUT && (initial == LOW || initial == HIGH)) {
+      output_gpio(gpio, initial);
+   }
+   setup_gpio(gpio, direction, pud);
+   gpio_direction[gpio] = direction;
+   return 1;
+}
+
 // python function setup(channel(s), direction, pull_up_down=PUD_OFF, initial=None)
 static PyObject *py_setup_channel(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-   unsigned int gpio;
    int channel = -1;
    int direction;
    int i, chancount;
@@ -195,37 +232,6 @@ static PyObject *py_setup_channel(PyObject *self, PyObject *args, PyObject *kwar
    int pud = PUD_OFF + PY_PUD_CONST_OFFSET;
    int initial = -1;
    static char *kwlist[] = {"channel", "direction", "pull_up_down", "initial", NULL};
-   int func;
-
-   int setup_one(void) {
-      if (get_gpio_number(channel, &gpio))
-         return 0;
-
-      func = gpio_function(gpio);
-      if (gpio_warnings &&                             // warnings enabled and
-          ((func != 0 && func != 1) ||                 // (already one of the alt functions or
-          (gpio_direction[gpio] == -1 && func == 1)))  // already an output not set from this program)
-      {
-         PyErr_WarnEx(NULL, "This channel is already in use, continuing anyway.  Use GPIO.setwarnings(False) to disable warnings.", 1);
-      }
-
-      // warn about pull/up down on i2c channels
-      if (gpio_warnings) {
-         if (rpiinfo.p1_revision == 0) { // compute module - do nothing
-         } else if ((rpiinfo.p1_revision == 1 && (gpio == 0 || gpio == 1)) ||
-                    (gpio == 2 || gpio == 3)) {
-            if (pud == PUD_UP || pud == PUD_DOWN)
-               PyErr_WarnEx(NULL, "A physical pull up resistor is fitted on this channel!", 1);
-         }
-      }
-
-      if (direction == OUTPUT && (initial == LOW || initial == HIGH)) {
-         output_gpio(gpio, initial);
-      }
-      setup_gpio(gpio, direction, pud);
-      gpio_direction[gpio] = direction;
-      return 1;
-   }
 
    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oi|ii", kwlist, &chanlist, &direction, &pud, &initial))
       return NULL;
@@ -290,7 +296,7 @@ static PyObject *py_setup_channel(PyObject *self, PyObject *args, PyObject *kwar
    } else if (chantuple) {
        chancount = PyTuple_Size(chantuple);
    } else {
-       if (!setup_one())
+       if (!setup_one(channel, pud, direction, initial))
           return NULL;
        Py_RETURN_NONE;
    }
@@ -320,17 +326,35 @@ static PyObject *py_setup_channel(PyObject *self, PyObject *args, PyObject *kwar
           return NULL;
       }
 
-      if (!setup_one())
+      if (!setup_one(channel, pud, direction, initial))
          return NULL;
    }
 
    Py_RETURN_NONE;
 }
 
+// helper function for output()
+static int do_output(int channel, int value) {
+   unsigned int gpio;
+   if (get_gpio_number(channel, &gpio))
+       return 0;
+
+   if (gpio_direction[gpio] != OUTPUT)
+   {
+      PyErr_SetString(PyExc_RuntimeError, "The GPIO channel has not been set up as an OUTPUT");
+      return 0;
+   }
+
+   if (check_gpio_priv())
+      return 0;
+
+   output_gpio(gpio, value);
+   return 1;
+}
+
 // python function output(channel(s), value(s))
 static PyObject *py_output_gpio(PyObject *self, PyObject *args)
 {
-   unsigned int gpio;
    int channel = -1;
    int value = -1;
    int i;
@@ -341,23 +365,6 @@ static PyObject *py_output_gpio(PyObject *self, PyObject *args)
    PyObject *tempobj = NULL;
    int chancount = -1;
    int valuecount = -1;
-
-   int output(void) {
-      if (get_gpio_number(channel, &gpio))
-          return 0;
-
-      if (gpio_direction[gpio] != OUTPUT)
-      {
-         PyErr_SetString(PyExc_RuntimeError, "The GPIO channel has not been set up as an OUTPUT");
-         return 0;
-      }
-
-      if (check_gpio_priv())
-         return 0;
-
-      output_gpio(gpio, value);
-      return 1;
-   }
 
    if (!PyArg_ParseTuple(args, "OO", &chanlist, &valuelist))
        return NULL;
@@ -416,7 +423,7 @@ static PyObject *py_output_gpio(PyObject *self, PyObject *args)
    }
 
    if (chancount == -1) {
-      if (!output())
+      if (!do_output(channel, value))
          return NULL;
       Py_RETURN_NONE;
    }
@@ -472,7 +479,7 @@ static PyObject *py_output_gpio(PyObject *self, PyObject *args)
               return NULL;
           }
       }
-      if (!output())
+      if (!do_output(channel, value))
          return NULL;
    }
 
